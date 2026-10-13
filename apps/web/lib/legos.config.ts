@@ -63,6 +63,26 @@ export const LEGOS: readonly LegoConfig[] = [
   },
   {
     "config": {
+      "tier_ladder": [
+        {
+          "name": "Audit Prep \u2014 Monthly",
+          "price_id": "price_1UQ0946WMeYkDDIuRnd5OEKX",
+          "amount": 200000,
+          "interval": "month"
+        },
+        {
+          "name": "Audit Prep \u2014 Annual Prepay",
+          "price_id": "price_1UQ0946WMeYkDDIusmQ4BE6v",
+          "amount": 180000,
+          "interval": "month"
+        },
+        {
+          "name": "Type II Continuous",
+          "price_id": "price_1UQ0946WMeYkDDIuHV3tJnoP",
+          "amount": 300000,
+          "interval": "month"
+        }
+      ],
       "default_currency": "usd",
       "enable_proration": true,
       "trial_days": 0
