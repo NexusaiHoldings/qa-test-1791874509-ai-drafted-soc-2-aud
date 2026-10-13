@@ -1,265 +1,249 @@
-import { Pool } from "pg";
+import { db } from "@nexus/db";
 import { logAuditEvent } from "@nexus/admin-console";
 
-export type ReviewItemType = "control_link" | "policy_version" | "critical_gap";
+export type ReviewQueueItemType = "control_link" | "policy_version" | "critical_gap";
 
 export interface ReviewQueueItem {
   id: string;
-  type: ReviewItemType;
   orgId: string;
   orgName: string;
+  type: ReviewQueueItemType;
   title: string;
   subtitle: string;
   confidence: number | null;
-  ageHours: number;
   createdAt: string;
-  payload: Record<string, unknown>;
-}
-
-export interface ReviewQueueListResult {
-  items: ReviewQueueItem[];
-}
-
-export interface ReviewDecisionInput {
-  reviewerId: string;
-  reviewerEmail?: string | null;
-  action: "approve" | "return";
-  note?: string | null;
-  editedRationale?: string | null;
-}
-
-export interface ReviewQueueDetail extends ReviewQueueItem {
+  ageHours: number;
+  rationale: string | null;
   detail: Record<string, unknown>;
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-const POLICY_REVIEW_THRESHOLD = Number(process.env.SOC2_POLICY_REVIEW_THRESHOLD ?? "3");
-
-function normalizeConfidence(value: unknown): number | null {
-  if (typeof value === "number") return value;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
+export interface ReviewQueueFilters {
+  limit?: number;
+  offset?: number;
+  needsReviewThreshold?: number;
 }
 
-export async function listReviewQueue(): Promise<ReviewQueueListResult> {
-  const client = await pool.connect();
-  try {
-    const { rows } = await client.query(
-      `
-      WITH control_link_items AS (
-        SELECT
-          cel.id::text AS id,
-          'control_link'::text AS type,
-          cel.org_id::text AS org_id,
-          COALESCE(o.name, cel.org_id::text) AS org_name,
-          ('Control link: ' || cel.control_id) AS title,
-          COALESCE(ea.title, 'Evidence artifact') AS subtitle,
-          cel.mapping_confidence::text AS confidence,
-          cel.created_at AS created_at,
-          jsonb_build_object(
-            'controlId', cel.control_id,
-            'artifactId', cel.artifact_id::text,
-            'artifactTitle', ea.title,
-            'rationale', cel.rationale
-          ) AS payload
-        FROM soc2_control_evidence_links cel
-        LEFT JOIN organizations o ON o.id = cel.org_id
-        LEFT JOIN soc2_evidence_artifacts ea ON ea.id = cel.artifact_id
-        WHERE cel.status = 'proposed'
-          AND cel.mapping_confidence < 0.7
-      ),
-      policy_items AS (
-        SELECT
-          pv.id::text AS id,
-          'policy_version'::text AS type,
-          pv.org_id::text AS org_id,
-          COALESCE(o.name, pv.org_id::text) AS org_name,
-          ('Policy needs review: ' || pv.title) AS title,
-          ('Needs review count: ' || pv.needs_review_count::text) AS subtitle,
-          NULL::text AS confidence,
-          pv.updated_at AS created_at,
-          jsonb_build_object(
-            'policyId', pv.policy_id::text,
-            'status', pv.status,
-            'needsReviewCount', pv.needs_review_count,
-            'bodyMarkdown', pv.body_markdown,
-            'rationale', pv.rationale
-          ) AS payload
-        FROM soc2_policy_versions pv
-        LEFT JOIN organizations o ON o.id = pv.org_id
-        WHERE pv.needs_review_count >= $1
-      ),
-      critical_gap_items AS (
-        SELECT
-          gf.id::text AS id,
-          'critical_gap'::text AS type,
-          gf.org_id::text AS org_id,
-          COALESCE(o.name, gf.org_id::text) AS org_name,
-          ('Critical gap: ' || gf.control_id) AS title,
-          COALESCE(gf.control_title, gf.category_title) AS subtitle,
-          NULL::text AS confidence,
-          gf.created_at AS created_at,
-          jsonb_build_object(
-            'reportId', gf.report_id::text,
-            'controlId', gf.control_id,
-            'severity', gf.severity,
-            'modelRationale', gf.model_rationale,
-            'missingEvidence', gf.missing_evidence
-          ) AS payload
-        FROM soc2_gap_findings gf
-        INNER JOIN soc2_gap_reports gr ON gr.id = gf.report_id
-        LEFT JOIN organizations o ON o.id = gf.org_id
-        WHERE gf.severity = 'critical'
-          AND gr.released_at IS NULL
-      )
-      SELECT * FROM control_link_items
+export interface ReviewDecisionInput {
+  itemType: ReviewQueueItemType;
+  itemId: string;
+  decision: "approved" | "returned";
+  note?: string;
+  editedRationale?: string;
+  reviewerId: string;
+  reviewerEmail?: string | null;
+}
+
+function toAgeHours(createdAt: string): number {
+  const created = new Date(createdAt).getTime();
+  const now = Date.now();
+  return Math.max(0, Math.round((now - created) / (1000 * 60 * 60)));
+}
+
+export async function getReviewQueueItems(filters: ReviewQueueFilters = {}): Promise<ReviewQueueItem[]> {
+  const limit: number = Math.min(Math.max(filters.limit ?? 50, 1), 200);
+  const offset: number = Math.max(filters.offset ?? 0, 0);
+  const needsReviewThreshold: number = Math.max(filters.needsReviewThreshold ?? 3, 1);
+
+  const sql = `
+    WITH org_names AS (
+      SELECT id::text AS org_id, name
+      FROM organizations
+    ),
+    control_items AS (
+      SELECT
+        cel.id::text AS id,
+        cel.org_id::text AS org_id,
+        coalesce(onm.name, cel.org_id::text) AS org_name,
+        'control_link'::text AS type,
+        ('Control ' || cel.control_id || ' ↔ ' || ea.title) AS title,
+        ('Mapping method: ' || cel.mapping_method) AS subtitle,
+        cel.mapping_confidence::float AS confidence,
+        cel.created_at,
+        cel.rationale,
+        jsonb_build_object(
+          'control_id', cel.control_id,
+          'artifact_id', cel.artifact_id::text,
+          'artifact_title', ea.title,
+          'artifact_summary', ea.summary,
+          'artifact_type', ea.artifact_type
+        ) AS detail
+      FROM soc2_control_evidence_links cel
+      INNER JOIN soc2_evidence_artifacts ea ON ea.id = cel.artifact_id
+      LEFT JOIN org_names onm ON onm.org_id = cel.org_id::text
+      WHERE cel.status = 'proposed'
+        AND (cel.needs_review = true OR cel.mapping_confidence < 0.700)
+    ),
+    policy_items AS (
+      SELECT
+        pv.id::text AS id,
+        pv.org_id::text AS org_id,
+        coalesce(onm.name, pv.org_id::text) AS org_name,
+        'policy_version'::text AS type,
+        pv.title AS title,
+        ('Needs review count: ' || pv.needs_review_count::text) AS subtitle,
+        NULL::float AS confidence,
+        pv.updated_at AS created_at,
+        pv.rationale,
+        jsonb_build_object(
+          'policy_id', pv.policy_id::text,
+          'status', pv.status,
+          'needs_review_count', pv.needs_review_count,
+          'body_markdown', pv.body_markdown
+        ) AS detail
+      FROM soc2_policy_versions pv
+      LEFT JOIN org_names onm ON onm.org_id = pv.org_id::text
+      WHERE pv.needs_review_count >= $1
+    ),
+    gap_items AS (
+      SELECT
+        gf.id::text AS id,
+        gf.org_id::text AS org_id,
+        coalesce(onm.name, gf.org_id::text) AS org_name,
+        'critical_gap'::text AS type,
+        ('Critical finding: ' || gf.control_id) AS title,
+        ('Report week: ' || gr.report_week::text) AS subtitle,
+        NULL::float AS confidence,
+        gf.created_at,
+        gf.model_rationale AS rationale,
+        jsonb_build_object(
+          'report_id', gr.id::text,
+          'report_week', gr.report_week::text,
+          'finding_id', gf.id::text,
+          'control_id', gf.control_id,
+          'severity', gf.severity,
+          'missing_evidence', gf.missing_evidence,
+          'remediation_steps', gf.remediation_steps
+        ) AS detail
+      FROM soc2_gap_findings gf
+      INNER JOIN soc2_gap_reports gr ON gr.id = gf.report_id
+      LEFT JOIN org_names onm ON onm.org_id = gf.org_id::text
+      WHERE gf.severity = 'critical'
+        AND gr.released_at IS NULL
+    )
+    SELECT *
+    FROM (
+      SELECT * FROM control_items
       UNION ALL
       SELECT * FROM policy_items
       UNION ALL
-      SELECT * FROM critical_gap_items
-      ORDER BY created_at ASC
-      `,
-      [POLICY_REVIEW_THRESHOLD],
-    );
+      SELECT * FROM gap_items
+    ) q
+    ORDER BY created_at ASC
+    LIMIT $2 OFFSET $3;
+  `;
 
-    const now = Date.now();
-    const items: ReviewQueueItem[] = rows.map((r) => {
-      const createdAt = new Date(r.created_at);
-      const ageHours = Math.max(0, (now - createdAt.getTime()) / 36e5);
-      return {
-        id: r.id,
-        type: r.type as ReviewItemType,
-        orgId: r.org_id,
-        orgName: r.org_name,
-        title: r.title,
-        subtitle: r.subtitle,
-        confidence: normalizeConfidence(r.confidence),
-        ageHours,
-        createdAt: createdAt.toISOString(),
-        payload: (r.payload ?? {}) as Record<string, unknown>,
-      };
-    });
-
-    return { items };
-  } finally {
-    client.release();
-  }
+  const result = await db.query(sql, [needsReviewThreshold, limit, offset]);
+  return result.rows.map((row: Record<string, unknown>) => {
+    const createdAt = String(row.created_at);
+    return {
+      id: String(row.id),
+      orgId: String(row.org_id),
+      orgName: String(row.org_name),
+      type: row.type as ReviewQueueItemType,
+      title: String(row.title),
+      subtitle: String(row.subtitle),
+      confidence: row.confidence === null ? null : Number(row.confidence),
+      createdAt,
+      ageHours: toAgeHours(createdAt),
+      rationale: row.rationale ? String(row.rationale) : null,
+      detail: (row.detail ?? {}) as Record<string, unknown>,
+    };
+  });
 }
 
-export async function getReviewItemById(id: string): Promise<ReviewQueueDetail | null> {
-  const { items } = await listReviewQueue();
-  const found = items.find((item) => item.id === id);
-  if (!found) return null;
-  return {
-    ...found,
-    detail: found.payload,
-  };
+export async function getReviewQueueItemById(id: string): Promise<ReviewQueueItem | null> {
+  const items = await getReviewQueueItems({ limit: 200, offset: 0 });
+  const found = items.find((item: ReviewQueueItem) => item.id === id);
+  return found ?? null;
 }
 
-export async function submitReviewDecision(
-  itemId: string,
-  input: ReviewDecisionInput,
-): Promise<{ ok: true }> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+export async function submitReviewDecision(input: ReviewDecisionInput): Promise<void> {
+  const now = new Date().toISOString();
 
-    const item = await getReviewItemById(itemId);
-    if (!item) {
-      await client.query("ROLLBACK");
-      throw new Error("Review item not found");
-    }
-
-    await client.query(
-      `
+  await db.query(
+    `
       INSERT INTO soc2_expert_reviews (
-        id, org_id, item_type, item_id, decision, note, edited_rationale, reviewer_id, reviewer_email, created_at
+        org_id, item_type, item_id, decision, note, edited_rationale, reviewer_id, reviewer_email, created_at
       )
-      VALUES (
-        gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, now()
-      )
-      `,
-      [
-        item.orgId,
-        item.type,
-        item.id,
-        input.action,
-        input.note ?? null,
-        input.editedRationale ?? null,
-        input.reviewerId,
-        input.reviewerEmail ?? null,
-      ],
-    );
+      SELECT org_id, $1, $2::uuid, $3, $4, $5, $6::uuid, $7, $8::timestamptz
+      FROM (
+        SELECT org_id FROM soc2_control_evidence_links WHERE id = $2::uuid
+        UNION ALL
+        SELECT org_id FROM soc2_policy_versions WHERE id = $2::uuid
+        UNION ALL
+        SELECT org_id FROM soc2_gap_findings WHERE id = $2::uuid
+      ) src
+      LIMIT 1
+    `,
+    [
+      input.itemType,
+      input.itemId,
+      input.decision,
+      input.note ?? null,
+      input.editedRationale ?? null,
+      input.reviewerId,
+      input.reviewerEmail ?? null,
+      now,
+    ],
+  );
 
-    if (item.type === "control_link") {
-      await client.query(
-        `
+  if (input.itemType === "control_link") {
+    await db.query(
+      `
         UPDATE soc2_control_evidence_links
         SET
-          status = CASE WHEN $2 = 'approve' THEN 'confirmed' ELSE 'rejected' END,
+          status = CASE WHEN $2 = 'approved' THEN 'confirmed' ELSE 'rejected' END,
           rationale = COALESCE($3, rationale),
-          reviewed_by = $1,
-          reviewed_at = now(),
-          updated_at = now()
-        WHERE id = $4::uuid
-        `,
-        [input.reviewerId, input.action, input.editedRationale ?? null, item.id],
-      );
-    }
+          reviewed_by = $4::uuid,
+          reviewed_at = $5::timestamptz,
+          needs_review = false,
+          updated_at = $5::timestamptz
+        WHERE id = $1::uuid
+      `,
+      [input.itemId, input.decision, input.editedRationale ?? null, input.reviewerId, now],
+    );
+  }
 
-    if (item.type === "policy_version") {
-      await client.query(
-        `
+  if (input.itemType === "policy_version") {
+    await db.query(
+      `
         UPDATE soc2_policy_versions
         SET
-          status = CASE WHEN $2 = 'approve' THEN 'approved' ELSE 'in_review' END,
+          status = CASE WHEN $2 = 'approved' THEN 'approved' ELSE 'in_review' END,
           rationale = COALESCE($3, rationale),
-          approved_by = CASE WHEN $2 = 'approve' THEN $1::uuid ELSE approved_by END,
-          approved_at = CASE WHEN $2 = 'approve' THEN now() ELSE approved_at END,
-          updated_at = now()
-        WHERE id = $4::uuid
-        `,
-        [input.reviewerId, input.action, input.editedRationale ?? null, item.id],
-      );
-    }
-
-    if (item.type === "critical_gap" && input.action === "approve") {
-      await client.query(
-        `
-        UPDATE soc2_gap_reports
-        SET released_at = now(), released_by = $1::uuid
-        WHERE id = (
-          SELECT report_id FROM soc2_gap_findings WHERE id = $2::uuid
-        )
-        `,
-        [input.reviewerId, item.id],
-      );
-    }
-
-    await logAuditEvent({
-      action: "soc2.expert_review.decision",
-      actorId: input.reviewerId,
-      targetType: item.type,
-      targetId: item.id,
-      orgId: item.orgId,
-      metadata: {
-        decision: input.action,
-        note: input.note ?? null,
-      },
-    });
-
-    await client.query("COMMIT");
-    return { ok: true };
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
+          needs_review_count = CASE WHEN $2 = 'approved' THEN 0 ELSE needs_review_count END,
+          approved_by = CASE WHEN $2 = 'approved' THEN $4::uuid ELSE approved_by END,
+          approved_at = CASE WHEN $2 = 'approved' THEN $5::timestamptz ELSE approved_at END,
+          updated_at = $5::timestamptz
+        WHERE id = $1::uuid
+      `,
+      [input.itemId, input.decision, input.editedRationale ?? null, input.reviewerId, now],
+    );
   }
+
+  if (input.itemType === "critical_gap" && input.decision === "approved") {
+    await db.query(
+      `
+        UPDATE soc2_gap_reports gr
+        SET released_at = $2::timestamptz, released_by = $3::uuid
+        FROM soc2_gap_findings gf
+        WHERE gf.id = $1::uuid
+          AND gf.report_id = gr.id
+          AND gr.released_at IS NULL
+      `,
+      [input.itemId, now, input.reviewerId],
+    );
+  }
+
+  await logAuditEvent({
+    action: "soc2.review_queue.decision",
+    actorId: input.reviewerId,
+    targetType: input.itemType,
+    targetId: input.itemId,
+    metadata: {
+      decision: input.decision,
+      note: input.note ?? null,
+      editedRationale: input.editedRationale ?? null,
+    },
+  });
 }

@@ -277,35 +277,30 @@ CREATE TABLE IF NOT EXISTS soc2_gap_findings (
   org_id uuid NOT NULL,
   report_id uuid NOT NULL REFERENCES soc2_gap_reports (id) ON DELETE CASCADE,
   control_id text NOT NULL REFERENCES soc2_controls (control_id),
-  category text NOT NULL,
-  category_title text NOT NULL,
-  control_title text NOT NULL,
-  coverage_score numeric(5,2) NOT NULL DEFAULT 0,
-  severity text NOT NULL DEFAULT 'medium',
-  confirmed_links integer NOT NULL DEFAULT 0,
-  has_approved_policy boolean NOT NULL DEFAULT false,
-  fresh_evidence boolean NOT NULL DEFAULT false,
+  severity text NOT NULL,
+  score numeric(5,2) NOT NULL DEFAULT 0,
   missing_evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
-  model_rationale text NOT NULL DEFAULT '',
   remediation_steps jsonb NOT NULL DEFAULT '[]'::jsonb,
+  model_rationale text,
   status text NOT NULL DEFAULT 'open',
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_org
-  ON soc2_gap_findings (org_id, severity, created_at DESC);
+  ON soc2_gap_findings (org_id, report_id, severity);
 
+-- ── Remediation task tracker linked to findings ──
 CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
   finding_id uuid NOT NULL REFERENCES soc2_gap_findings (id) ON DELETE CASCADE,
   title text NOT NULL,
-  instructions text NOT NULL DEFAULT '',
-  owner_id uuid,
-  due_at timestamptz,
+  description text NOT NULL DEFAULT '',
   status text NOT NULL DEFAULT 'open',
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  assignee_id uuid,
+  due_at timestamptz,
+  closed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_org
-  ON soc2_remediation_tasks (org_id, status, created_at DESC);
+  ON soc2_remediation_tasks (org_id, status, due_at);
 `;

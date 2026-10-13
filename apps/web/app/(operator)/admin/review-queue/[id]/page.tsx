@@ -1,92 +1,77 @@
 import { redirect } from "next/navigation";
 import { getAdminUser } from "@nexus/identity-and-access";
+import { db } from "@nexus/db";
 import { logAuditEvent } from "@nexus/admin-console";
-import { getReviewItemById, submitReviewDecision } from "@/lib/soc2/review/queue";
+import { getReviewQueueItemById } from "@/lib/soc2/review/queue";
 
 interface PageProps {
   params: { id: string };
 }
 
-async function decide(formData: FormData): Promise<void> {
-  "use server";
-  const admin = await getAdminUser();
-  if (!admin) redirect("/");
-
-  const id = String(formData.get("id") ?? "");
-  const action = String(formData.get("action") ?? "") as "approve" | "return";
-  const note = String(formData.get("note") ?? "");
-  const editedRationale = String(formData.get("editedRationale") ?? "");
-
-  if (!id || (action !== "approve" && action !== "return")) return;
-
-  await submitReviewDecision(id, {
-    reviewerId: admin.id,
-    reviewerEmail: admin.email ?? null,
-    action,
-    note: note || null,
-    editedRationale: editedRationale || null,
-  });
-
-  redirect("/admin/review-queue");
-}
-
-export default async function ReviewQueueDetailPage({ params }: PageProps): Promise<JSX.Element> {
-  const admin = await getAdminUser();
-  if (!admin) {
+export default async function ReviewQueueItemPage({ params }: PageProps): Promise<JSX.Element> {
+  const adminUser = await getAdminUser();
+  if (!adminUser) {
     redirect("/");
   }
 
-  const item = await getReviewItemById(params.id);
+  const item = await getReviewQueueItemById(params.id);
   if (!item) {
-    redirect("/admin/review-queue");
+    return (
+      <main>
+        <h1>Review Queue</h1>
+        <p className="muted">Item not found.</p>
+      </main>
+    );
   }
 
+  await db.query("SELECT 1");
   await logAuditEvent({
-    action: "soc2.operator.policy_view",
-    actorId: admin.id,
+    action: "soc2.review_queue.view_item",
+    actorId: String(adminUser.id),
     targetType: item.type,
     targetId: item.id,
-    orgId: item.orgId,
-    metadata: { route: "/admin/review-queue/[id]" },
+    metadata: { orgId: item.orgId },
   });
 
   return (
     <main>
       <h1>Review Item</h1>
-      <p>{item.orgName} · {item.type}</p>
+      <p className="muted">
+        {item.orgName} · {item.type} · {item.ageHours}h old
+      </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "1rem" }}>
-        <section className="card">
-          <h2>Queue context</h2>
-          <p><strong>{item.title}</strong></p>
-          <p className="muted">{item.subtitle}</p>
-          <p className="muted">
-            {item.confidence !== null ? `Confidence ${item.confidence.toFixed(3)} · ` : ""}
-            {Math.round(item.ageHours)}h old
-          </p>
-        </section>
+      <section className="card">
+        <h2>{item.title}</h2>
+        <p>{item.subtitle}</p>
+        {item.confidence !== null ? <p>Confidence: {item.confidence.toFixed(3)}</p> : null}
+        <p className="muted">Rationale</p>
+        <p>{item.rationale ?? "No rationale provided."}</p>
+      </section>
 
-        <section className="card">
-          <h2>Review pane</h2>
-          <pre>{JSON.stringify(item.detail, null, 2)}</pre>
+      <section className="card">
+        <h2>Details</h2>
+        <pre>{JSON.stringify(item.detail, null, 2)}</pre>
+      </section>
 
-          <form action={decide}>
-            <input type="hidden" name="id" value={item.id} />
-            <label htmlFor="editedRationale">Edited rationale</label>
-            <textarea id="editedRationale" name="editedRationale" rows={6} defaultValue="" />
-
-            <label htmlFor="note">Return note (required if returning)</label>
-            <textarea id="note" name="note" rows={4} defaultValue="" />
-
-            <div className="toolbar">
-              <button type="submit" name="action" value="approve">Approve</button>
-              <button type="submit" name="action" value="return" className="secondary">
-                Return with note
-              </button>
-            </div>
-          </form>
-        </section>
-      </div>
+      <section className="card">
+        <h2>Decision</h2>
+        <form method="post" action="/admin/api/review-queue">
+          <input type="hidden" name="itemType" value={item.type} />
+          <input type="hidden" name="itemId" value={item.id} />
+          <label htmlFor="editedRationale">Edited rationale (optional)</label>
+          <textarea id="editedRationale" name="editedRationale" />
+          <label htmlFor="note">Reviewer note</label>
+          <textarea id="note" name="note" required />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" name="decision" value="approved">
+              Approve
+            </button>
+            <button type="submit" name="decision" value="returned" className="secondary">
+              Return with note
+            </button>
+          </div>
+        </form>
+      </section>
     </main>
   );
 }
