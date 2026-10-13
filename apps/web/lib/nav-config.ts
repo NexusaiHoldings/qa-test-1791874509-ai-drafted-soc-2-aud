@@ -1,75 +1,68 @@
+
 /**
- * Navigation configuration consumed by the substrate's <TopNav /> strip.
+ * Navigation configuration consumed by the substrate's <TopNav />.
  *
- * F1-001 — Homepage + Top Navigation.
- *
- * Shape contract (substrate-owned, do not change):
- *   - `primary` renders as the always-visible link strip.
- *   - `groups` render as dropdown sections beneath the strip.
- *   - Links (and groups) flagged `adminOnly` — and any href under
- *     `/admin/*` — are marked admin-only by the nav generator and are
- *     never rendered in the public nav.
- *
- * Every href below maps to a feature page in the mvp_scope.
+ * Shape contract (substrate-owned): NAV_CONFIG is an object literal with
+ * `primary` (flat list of top-level links) and `groups` (labelled dropdown
+ * groups). Links whose href sits under /admin/* are flagged admin-only and
+ * are filtered out of the public nav by the nav generator; we also mark
+ * them explicitly via `adminOnly` so the intent is unambiguous.
  */
 
 export interface NavLink {
-  /** Visible label rendered in the top nav. */
-  label: string;
-  /** App Router href the link navigates to. */
+  /** URL path the link points at (App Router path). */
   href: string;
-  /** When true, the nav generator hides this link from the public nav. */
+  /** Human-readable label rendered in the nav strip. */
+  label: string;
+  /** When true, the link is restricted to admin users and hidden publicly. */
   adminOnly?: boolean;
 }
 
 export interface NavGroup {
-  /** Dropdown/section label. */
+  /** Dropdown / section label for this group of links. */
   label: string;
-  /** Links contained in this group. */
+  /** Ordered links rendered inside the group. */
   links: NavLink[];
-  /** When true, the entire group is hidden from the public nav. */
-  adminOnly?: boolean;
 }
 
 export interface NavConfig {
-  /** Always-visible primary links, rendered left to right. */
+  /** Flat, always-visible top-level links. */
   primary: NavLink[];
-  /** Grouped dropdown sections rendered after the primary links. */
+  /** Labelled groups rendered as dropdowns after the primary links. */
   groups: NavGroup[];
 }
 
 export const NAV_CONFIG: NavConfig = {
   primary: [
-    { label: "Home", href: "/" },
-    { label: "Gap Analysis", href: "/gaps" },
-    { label: "Policies", href: "/policies" },
-    { label: "Controls", href: "/controls" },
-    { label: "Connectors", href: "/connectors" },
+    { href: "/", label: "Home" },
+    { href: "/gaps", label: "Gap Analysis" },
+    { href: "/policies", label: "Policies" },
+    { href: "/controls", label: "Controls" },
+    { href: "/connectors", label: "Connectors" },
   ],
   groups: [
     {
       label: "Evidence",
       links: [
-        { label: "Upload Evidence", href: "/evidence/upload" },
-        { label: "Audit Package", href: "/package" },
+        { href: "/evidence/upload", label: "Upload Evidence" },
+        { href: "/package", label: "Audit Package" },
       ],
     },
     {
       label: "Try It",
-      links: [{ label: "Free Gap Check", href: "/gap-check" }],
+      links: [{ href: "/gap-check", label: "Free Gap Check" }],
     },
     {
       label: "Admin",
-      adminOnly: true,
       links: [
         {
-          label: "Review Queue",
           href: "/admin/review-queue",
+          label: "Review Queue",
           adminOnly: true,
         },
         {
-          label: "Control Library",
           href: "/admin/controls",
+          label: "Control Library",
           adminOnly: true,
         },
       ],
