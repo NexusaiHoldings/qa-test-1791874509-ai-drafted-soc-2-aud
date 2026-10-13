@@ -125,4 +125,65 @@ CREATE TABLE IF NOT EXISTS soc2_policy_claims (
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_policy_claims_version
   ON soc2_policy_claims (policy_version_id);
+
+-- ── Policy lifecycle columns (F1-005 — grounded drafting + approval gate) ──
+-- A version carries a content_hash (sha256 of body_markdown) so an approval can
+-- be pinned to the exact bytes that were approved; the lifecycle is
+-- draft -> in_review -> approved. drafted_with_model records the gateway model.
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS content_hash text;
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS needs_review_count integer NOT NULL DEFAULT 0;
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS submitted_by uuid;
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS approved_by uuid;
+ALTER TABLE soc2_policy_versions
+  ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+
+-- ── Per-tenant policy registry (F1-005) ──
+-- The 10 highest-frequency policies from ceo_briefing.mvp_scope. Seeded lazily
+-- per org from the soc2_policy_templates skeleton in
+-- apps/web/lib/soc2/policies/templates.ts. covered_control_ids lists the Security
+-- TSC criteria each policy documents; the drafter grounds a policy only in the
+-- CONFIRMED evidence linked to those criteria.
+CREATE TABLE IF NOT EXISTS soc2_policies (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  policy_key text NOT NULL,
+  title text NOT NULL,
+  summary text NOT NULL DEFAULT '',
+  covered_control_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  sort_order integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (org_id, policy_key)
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_policies_org
+  ON soc2_policies (org_id, sort_order);
+
+-- ── Approval records (F1-005 — the COO research_direction gate) ──
+-- One immutable row per approval event. Pins the approver (must be an org
+-- owner/admin per @nexus/organizations-and-teams) and the content_hash of the
+-- version they approved; also mirrored to @nexus/admin-console admin_audit_log.
+-- An unapproved version can never enter the audit package (see approval.ts).
+CREATE TABLE IF NOT EXISTS soc2_policy_approvals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  policy_id uuid NOT NULL,
+  policy_version_id uuid NOT NULL REFERENCES soc2_policy_versions (id) ON DELETE CASCADE,
+  approver_id uuid NOT NULL,
+  approver_email text,
+  approver_role text NOT NULL,
+  content_hash text NOT NULL,
+  decision text NOT NULL DEFAULT 'approved',
+  note text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_policy_approvals_version
+  ON soc2_policy_approvals (policy_version_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_soc2_policy_approvals_org
+  ON soc2_policy_approvals (org_id, policy_id, created_at DESC);
 `;
