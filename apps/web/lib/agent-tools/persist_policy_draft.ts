@@ -1,175 +1,206 @@
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
-
-type ClaimInput = {
-  claim_id: string;
-  claim_text: string;
-  rationale?: string | null;
-  source_artifact_ids?: string[] | null;
-};
+import { randomUUID } from "node:crypto";
 
 type Args = {
-  policy_id: string;
-  version_notes?: string | null;
-  draft_text: string;
-  claims: ClaimInput[];
+  orgId: string;
+  policyId: string;
+  title: string;
+  bodyMarkdown: string;
+  rationale?: string;
+  claims: Array<{
+    claimType: string;
+    claimText: string;
+    sourceArtifactId?: string | null;
+    sourceExcerpt?: string | null;
+  }>;
+  modelName?: string;
 };
 
-type DbClient = {
-  query: (
-    text: string,
-    params?: ReadonlyArray<unknown>
-  ) => Promise<{ rows: Record<string, unknown>[] }>;
+type DbLike = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows?: Record<string, unknown>[] }>;
 };
 
-type HandlerContextWithDb = HandlerContext & {
-  db?: DbClient;
-};
-
-function asNonEmptyString(value: unknown, fieldName: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`invalid_${fieldName}`);
-  }
-  return value.trim();
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-function asOptionalString(value: unknown): string | null {
-  if (value === undefined || value === null) {
-    return null;
-  }
-  if (typeof value !== "string") {
-    throw new Error("invalid_optional_string");
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function parseClaims(value: unknown): ClaimInput[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("invalid_claims");
+function toArgs(input: unknown): Args {
+  if (!isObject(input)) {
+    throw new Error("Invalid args: expected object");
   }
 
-  return value.map((item, index) => {
-    if (typeof item !== "object" || item === null) {
-      throw new Error(`invalid_claims_item_${index}`);
+  const {
+    orgId,
+    policyId,
+    title,
+    bodyMarkdown,
+    rationale,
+    claims,
+    modelName,
+  } = input as Record<string, unknown>;
+
+  if (typeof orgId !== "string" || orgId.length === 0) {
+    throw new Error("Invalid args.orgId");
+  }
+  if (typeof policyId !== "string" || policyId.length === 0) {
+    throw new Error("Invalid args.policyId");
+  }
+  if (typeof title !== "string" || title.length === 0) {
+    throw new Error("Invalid args.title");
+  }
+  if (typeof bodyMarkdown !== "string" || bodyMarkdown.length === 0) {
+    throw new Error("Invalid args.bodyMarkdown");
+  }
+  if (!Array.isArray(claims)) {
+    throw new Error("Invalid args.claims");
+  }
+
+  const normalizedClaims = claims.map((claim, idx) => {
+    if (!isObject(claim)) {
+      throw new Error(`Invalid args.claims[${idx}]`);
     }
-    const rec = item as Record<string, unknown>;
-    const claimId = asNonEmptyString(rec.claim_id, "claim_id");
-    const claimText = asNonEmptyString(rec.claim_text, "claim_text");
-    const rationale = asOptionalString(rec.rationale);
+    const claimType = claim.claimType;
+    const claimText = claim.claimText;
+    const sourceArtifactId = claim.sourceArtifactId;
+    const sourceExcerpt = claim.sourceExcerpt;
 
-    const sourceArtifactIdsRaw = rec.source_artifact_ids;
-    let sourceArtifactIds: string[] | null = null;
-    if (sourceArtifactIdsRaw !== undefined && sourceArtifactIdsRaw !== null) {
-      if (!Array.isArray(sourceArtifactIdsRaw)) {
-        throw new Error(`invalid_source_artifact_ids_${index}`);
-      }
-      sourceArtifactIds = sourceArtifactIdsRaw.map((v, sourceIndex) =>
-        asNonEmptyString(v, `source_artifact_ids_${index}_${sourceIndex}`)
-      );
+    if (typeof claimType !== "string" || claimType.length === 0) {
+      throw new Error(`Invalid args.claims[${idx}].claimType`);
+    }
+    if (typeof claimText !== "string" || claimText.length === 0) {
+      throw new Error(`Invalid args.claims[${idx}].claimText`);
+    }
+    if (sourceArtifactId != null && typeof sourceArtifactId !== "string") {
+      throw new Error(`Invalid args.claims[${idx}].sourceArtifactId`);
+    }
+    if (sourceExcerpt != null && typeof sourceExcerpt !== "string") {
+      throw new Error(`Invalid args.claims[${idx}].sourceExcerpt`);
     }
 
     return {
-      claim_id: claimId,
-      claim_text: claimText,
-      rationale,
-      source_artifact_ids: sourceArtifactIds,
+      claimType,
+      claimText,
+      sourceArtifactId: sourceArtifactId ?? null,
+      sourceExcerpt: sourceExcerpt ?? null,
     };
   });
+
+  return {
+    orgId,
+    policyId,
+    title,
+    bodyMarkdown,
+    rationale: typeof rationale === "string" ? rationale : undefined,
+    claims: normalizedClaims,
+    modelName: typeof modelName === "string" ? modelName : undefined,
+  };
 }
 
-function toErrorResult(code: string, message: string): HandlerResult {
-  return {
-    ok: false,
-    error: {
-      code,
-      message,
-    },
-  } as unknown as HandlerResult;
-}
-
-function toOkResult(payload: Record<string, unknown>): HandlerResult {
-  return {
-    ok: true,
-    data: payload,
-  } as unknown as HandlerResult;
+async function getDbFromContext(ctx: HandlerContext): Promise<DbLike> {
+  const maybeDb = (ctx as unknown as { db?: DbLike }).db;
+  if (!maybeDb || typeof maybeDb.query !== "function") {
+    throw new Error("Database handle is missing from handler context");
+  }
+  return maybeDb;
 }
 
 export async function handlePersistPolicyDraft(
   ctx: HandlerContext,
-  args: Args
+  args: Args,
 ): Promise<HandlerResult> {
   try {
-    const db = (ctx as HandlerContextWithDb).db;
-    if (!db) {
-      return toErrorResult("db_unavailable", "Database client not available in handler context.");
-    }
+    const parsed = toArgs(args);
+    const db = await getDbFromContext(ctx);
 
-    const policyId = asNonEmptyString(args.policy_id, "policy_id");
-    const draftText = asNonEmptyString(args.draft_text, "draft_text");
-    const versionNotes = asOptionalString(args.version_notes);
-    const claims = parseClaims(args.claims);
-
-    const actorId =
-      (ctx as Record<string, unknown>).actorId ??
-      (ctx as Record<string, unknown>).userId ??
+    const versionId = randomUUID();
+    const insertedBy =
+      (ctx as unknown as { actorId?: string; userId?: string }).actorId ??
+      (ctx as unknown as { actorId?: string; userId?: string }).userId ??
       null;
 
     await db.query("BEGIN");
 
-    const currentVersionRes = await db.query(
-      "SELECT COALESCE(MAX(version_number), 0) AS max_version FROM soc2_policy_versions WHERE policy_id = $1",
-      [policyId]
+    await db.query(
+      `
+        INSERT INTO soc2_policy_versions (
+          id,
+          org_id,
+          policy_id,
+          title,
+          body_markdown,
+          rationale,
+          status,
+          drafted_by,
+          drafted_with_model,
+          created_at,
+          updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,'in_review',$7,$8,NOW(),NOW())
+      `,
+      [
+        versionId,
+        parsed.orgId,
+        parsed.policyId,
+        parsed.title,
+        parsed.bodyMarkdown,
+        parsed.rationale ?? null,
+        insertedBy,
+        parsed.modelName ?? null,
+      ],
     );
-    const currentVersionRaw = currentVersionRes.rows[0]?.max_version;
-    const currentVersion =
-      typeof currentVersionRaw === "number"
-        ? currentVersionRaw
-        : Number.parseInt(String(currentVersionRaw ?? "0"), 10);
-    const nextVersion = Number.isFinite(currentVersion) ? currentVersion + 1 : 1;
 
-    const versionInsertRes = await db.query(
-      "INSERT INTO soc2_policy_versions (policy_id, version_number, draft_text, version_notes, status, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-      [policyId, nextVersion, draftText, versionNotes, "in_review", actorId]
-    );
-
-    const policyVersionId = String(versionInsertRes.rows[0]?.id ?? "");
-    if (!policyVersionId) {
-      throw new Error("version_insert_failed");
-    }
-
-    for (const claim of claims) {
+    for (const claim of parsed.claims) {
       await db.query(
-        "INSERT INTO soc2_policy_claims (policy_version_id, claim_id, claim_text, rationale, source_artifact_ids) VALUES ($1, $2, $3, $4, $5)",
+        `
+          INSERT INTO soc2_policy_claims (
+            id,
+            org_id,
+            policy_version_id,
+            claim_type,
+            claim_text,
+            source_artifact_id,
+            source_excerpt,
+            created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+        `,
         [
-          policyVersionId,
-          claim.claim_id,
-          claim.claim_text,
-          claim.rationale ?? null,
-          JSON.stringify(claim.source_artifact_ids ?? []),
-        ]
+          randomUUID(),
+          parsed.orgId,
+          versionId,
+          claim.claimType,
+          claim.claimText,
+          claim.sourceArtifactId,
+          claim.sourceExcerpt,
+        ],
       );
     }
 
     await db.query("COMMIT");
 
-    return toOkResult({
-      policy_version_id: policyVersionId,
-      policy_id: policyId,
-      version_number: nextVersion,
-      status: "in_review",
-      claims_persisted: claims.length,
-    });
+    return {
+      ok: true,
+      data: {
+        versionId,
+        policyId: parsed.policyId,
+        status: "in_review",
+        claimsPersisted: parsed.claims.length,
+      },
+    } as HandlerResult;
   } catch (error) {
-    try {
-      const db = (ctx as HandlerContextWithDb).db;
-      if (db) {
-        await db.query("ROLLBACK");
+    const dbMaybe = (ctx as unknown as { db?: DbLike }).db;
+    if (dbMaybe && typeof dbMaybe.query === "function") {
+      try {
+        await dbMaybe.query("ROLLBACK");
+      } catch {
+        // no-op: preserve original error
       }
-    } catch {
-      // intentionally swallow rollback failures
     }
 
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return toErrorResult("persist_policy_draft_failed", message);
+    return {
+      ok: false,
+      error: {
+        code: "persist_policy_draft_failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+    } as HandlerResult;
   }
 }
