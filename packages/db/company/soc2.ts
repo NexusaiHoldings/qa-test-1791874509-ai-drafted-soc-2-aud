@@ -203,6 +203,24 @@ CREATE TABLE IF NOT EXISTS soc2_audit_packages (
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_audit_packages_org
   ON soc2_audit_packages (org_id, created_at DESC);
+
+-- ── Expert review records (F1-008) ──
+CREATE TABLE IF NOT EXISTS soc2_expert_reviews (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  item_type text NOT NULL,
+  item_id uuid NOT NULL,
+  decision text NOT NULL,
+  note text,
+  edited_rationale text,
+  reviewer_id uuid NOT NULL,
+  reviewer_email text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_expert_reviews_org
+  ON soc2_expert_reviews (org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_soc2_expert_reviews_item
+  ON soc2_expert_reviews (item_type, item_id, created_at DESC);
 `;
 
 /**
@@ -259,42 +277,30 @@ CREATE TABLE IF NOT EXISTS soc2_gap_findings (
   org_id uuid NOT NULL,
   report_id uuid NOT NULL REFERENCES soc2_gap_reports (id) ON DELETE CASCADE,
   control_id text NOT NULL REFERENCES soc2_controls (control_id),
-  category text NOT NULL,
-  category_title text NOT NULL,
-  control_title text NOT NULL,
-  coverage_score numeric(5,2) NOT NULL DEFAULT 0,
-  severity text NOT NULL DEFAULT 'medium',
-  confirmed_links integer NOT NULL DEFAULT 0,
-  has_approved_policy boolean NOT NULL DEFAULT false,
-  fresh_evidence boolean NOT NULL DEFAULT false,
+  severity text NOT NULL,
+  score numeric(5,2) NOT NULL DEFAULT 0,
   missing_evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
-  remediation text NOT NULL DEFAULT '',
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (report_id, control_id)
+  remediation_steps jsonb NOT NULL DEFAULT '[]'::jsonb,
+  model_rationale text,
+  status text NOT NULL DEFAULT 'open',
+  created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_report
-  ON soc2_gap_findings (report_id, severity);
-CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_org_control
-  ON soc2_gap_findings (org_id, control_id);
+CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_org
+  ON soc2_gap_findings (org_id, report_id, severity);
 
--- ── Remediation tasks the customer can assign + close ──
--- status: 'open' | 'in_progress' | 'done'. assignee + due_date are the
--- assign/due-date control on each finding row; closing stamps closed_at/closed_by.
+-- ── Remediation task tracker linked to findings ──
 CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
   finding_id uuid NOT NULL REFERENCES soc2_gap_findings (id) ON DELETE CASCADE,
   title text NOT NULL,
-  detail text NOT NULL DEFAULT '',
+  description text NOT NULL DEFAULT '',
   status text NOT NULL DEFAULT 'open',
   assignee_id uuid,
-  assignee_email text,
-  due_date date,
+  due_at timestamptz,
   closed_at timestamptz,
-  closed_by uuid,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_org
-  ON soc2_remediation_tasks (org_id, status, due_date);
+  ON soc2_remediation_tasks (org_id, status, due_at);
 `;
