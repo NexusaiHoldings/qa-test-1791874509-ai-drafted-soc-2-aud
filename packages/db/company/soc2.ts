@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS soc2_evidence_artifacts (
   title text NOT NULL,
   summary text,
   detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+  content_hash text,
   collected_at timestamptz NOT NULL DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -186,6 +187,22 @@ CREATE INDEX IF NOT EXISTS idx_soc2_policy_approvals_version
   ON soc2_policy_approvals (policy_version_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_soc2_policy_approvals_org
   ON soc2_policy_approvals (org_id, policy_id, created_at DESC);
+
+-- ── Audit package exports (F1-007) ──
+CREATE TABLE IF NOT EXISTS soc2_audit_packages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  exported_by uuid NOT NULL,
+  manifest_hash text NOT NULL,
+  package_file_id text NOT NULL,
+  pdf_file_id text NOT NULL,
+  signed_url text,
+  expires_at timestamptz,
+  package_meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_audit_packages_org
+  ON soc2_audit_packages (org_id, created_at DESC);
 `;
 
 /**
@@ -266,12 +283,9 @@ CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_org_control
 CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
-  report_id uuid NOT NULL REFERENCES soc2_gap_reports (id) ON DELETE CASCADE,
   finding_id uuid NOT NULL REFERENCES soc2_gap_findings (id) ON DELETE CASCADE,
-  control_id text NOT NULL,
   title text NOT NULL,
-  instructions text NOT NULL DEFAULT '',
-  severity text NOT NULL DEFAULT 'medium',
+  detail text NOT NULL DEFAULT '',
   status text NOT NULL DEFAULT 'open',
   assignee_id uuid,
   assignee_email text,
@@ -279,11 +293,8 @@ CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   closed_at timestamptz,
   closed_by uuid,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (finding_id)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_report
-  ON soc2_remediation_tasks (report_id, status);
 CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_org
   ON soc2_remediation_tasks (org_id, status, due_date);
 `;
