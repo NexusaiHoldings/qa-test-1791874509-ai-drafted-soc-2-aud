@@ -221,6 +221,83 @@ CREATE INDEX IF NOT EXISTS idx_soc2_expert_reviews_org
   ON soc2_expert_reviews (org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_soc2_expert_reviews_item
   ON soc2_expert_reviews (item_type, item_id, created_at DESC);
+
+-- ── GitHub connector registry + sync runs + webhook events (F1-003) ──
+CREATE TABLE IF NOT EXISTS soc2_connector_installations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  provider text NOT NULL,
+  installation_id text,
+  account_login text,
+  account_type text,
+  status text NOT NULL DEFAULT 'not_installed',
+  config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  last_error text,
+  connected_at timestamptz,
+  disconnected_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (org_id, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_connector_installations_org
+  ON soc2_connector_installations (org_id, provider);
+
+CREATE TABLE IF NOT EXISTS soc2_connector_repositories (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  provider text NOT NULL,
+  installation_id text NOT NULL,
+  repository_id text NOT NULL,
+  repository_name text NOT NULL,
+  full_name text NOT NULL,
+  default_branch text,
+  is_selected boolean NOT NULL DEFAULT true,
+  is_archived boolean NOT NULL DEFAULT false,
+  private boolean NOT NULL DEFAULT true,
+  branch_protected boolean NOT NULL DEFAULT false,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  last_synced_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (org_id, provider, repository_id)
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_connector_repositories_org
+  ON soc2_connector_repositories (org_id, provider, repository_name);
+
+CREATE TABLE IF NOT EXISTS soc2_sync_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  provider text NOT NULL,
+  run_type text NOT NULL DEFAULT 'manual',
+  status text NOT NULL DEFAULT 'running',
+  started_by uuid,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz,
+  artifacts_written integer NOT NULL DEFAULT 0,
+  repositories_scanned integer NOT NULL DEFAULT 0,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error text
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_sync_runs_org
+  ON soc2_sync_runs (org_id, provider, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS soc2_connector_webhook_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid,
+  provider text NOT NULL,
+  event_name text NOT NULL,
+  delivery_id text,
+  installation_id text,
+  repository_id text,
+  action text,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  processed_at timestamptz,
+  status text NOT NULL DEFAULT 'received',
+  error text
+);
+CREATE INDEX IF NOT EXISTS idx_soc2_connector_webhooks_installation
+  ON soc2_connector_webhook_events (provider, installation_id, received_at DESC);
 `;
 
 /**
@@ -276,19 +353,18 @@ CREATE TABLE IF NOT EXISTS soc2_gap_findings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
   report_id uuid NOT NULL REFERENCES soc2_gap_reports (id) ON DELETE CASCADE,
-  control_id text NOT NULL REFERENCES soc2_controls (control_id),
+  control_id text NOT NULL,
   severity text NOT NULL,
   score numeric(5,2) NOT NULL DEFAULT 0,
   missing_evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
-  remediation_steps jsonb NOT NULL DEFAULT '[]'::jsonb,
-  model_rationale text,
+  remediation_instructions text NOT NULL DEFAULT '',
   status text NOT NULL DEFAULT 'open',
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_org
-  ON soc2_gap_findings (org_id, report_id, severity);
+CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_report
+  ON soc2_gap_findings (report_id, severity, created_at DESC);
 
--- ── Remediation task tracker linked to findings ──
+-- ── Actionable remediation tasks ──
 CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
@@ -296,11 +372,13 @@ CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
   title text NOT NULL,
   description text NOT NULL DEFAULT '',
   status text NOT NULL DEFAULT 'open',
+  priority text NOT NULL DEFAULT 'medium',
   assignee_id uuid,
   due_at timestamptz,
   closed_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_org
-  ON soc2_remediation_tasks (org_id, status, due_at);
+  ON soc2_remediation_tasks (org_id, status, priority, created_at DESC);
 `;
