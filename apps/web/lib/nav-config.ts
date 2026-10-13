@@ -1,65 +1,71 @@
+
 /**
- * Top Navigation Configuration — substrate-topnav-001 (2026-05-24).
+ * Navigation configuration consumed by the substrate's <TopNav />.
  *
- * Substrate ships with one nav entry (Home). Each portfolio company's
- * coding pipeline extends this file via F1-001 (per CTO mvp_scope —
- * cto-prompt-nav-requirement-001) to add links to the company's
- * specific feature pages.
- *
- * The substrate's TopNav component reads PRIMARY_NAV_LINKS and renders
- * them in the order declared.
- *
- * Convention:
- *   - Always keep Home as the first entry.
- *   - Group related pages with NavGroup (admin, account, etc.).
- *   - Use relative paths (Next.js route group parens collapse out of
- *     the URL — e.g. apps/web/app/(domain)/configure/page.tsx serves
- *     at /configure).
- *   - Server-only data; no client JS bundled from this file.
+ * Shape contract (substrate-owned): NAV_CONFIG is an object literal with
+ * `primary` (flat list of top-level links) and `groups` (labelled dropdown
+ * groups). Links whose href sits under /admin/* are flagged admin-only and
+ * are filtered out of the public nav by the nav generator; we also mark
+ * them explicitly via `adminOnly` so the intent is unambiguous.
  */
 
-export type NavLink = {
-  /** URL path (without route-group parens). */
+export interface NavLink {
+  /** URL path the link points at (App Router path). */
   href: string;
-  /** Visible label. */
+  /** Human-readable label rendered in the nav strip. */
   label: string;
-  /** Operator/admin route — TopNav shows it only to admins. */
+  /** When true, the link is restricted to admin users and hidden publicly. */
   adminOnly?: boolean;
-};
+}
 
-export type NavGroup = {
-  /** Group label (e.g. "Account", "Admin"). */
+export interface NavGroup {
+  /** Dropdown / section label for this group of links. */
   label: string;
-  /** Child links shown inline (flat) inside the group. */
+  /** Ordered links rendered inside the group. */
   links: NavLink[];
-};
+}
 
-export type NavConfig = {
+export interface NavConfig {
+  /** Flat, always-visible top-level links. */
   primary: NavLink[];
+  /** Labelled groups rendered as dropdowns after the primary links. */
   groups: NavGroup[];
-};
+}
 
-/**
- * Default substrate configuration: just Home. Agents extending this
- * file should preserve Home as the first entry and append the
- * company-specific paths AFTER it.
- *
- * Example extension by F1-001:
- *   primary: [
- *     { href: "/", label: "Home" },
- *     { href: "/configure", label: "Configure" },
- *     { href: "/shop", label: "Shop" },
- *   ],
- *   groups: [
- *     { label: "Account", links: [
- *       { href: "/account/tier", label: "Tier" },
- *       { href: "/account/reorders", label: "Reorders" },
- *     ]},
- *   ],
- */
 export const NAV_CONFIG: NavConfig = {
   primary: [
     { href: "/", label: "Home" },
+    { href: "/gaps", label: "Gap Analysis" },
+    { href: "/policies", label: "Policies" },
+    { href: "/controls", label: "Controls" },
+    { href: "/connectors", label: "Connectors" },
   ],
-  groups: [],
+  groups: [
+    {
+      label: "Evidence",
+      links: [
+        { href: "/evidence/upload", label: "Upload Evidence" },
+        { href: "/package", label: "Audit Package" },
+      ],
+    },
+    {
+      label: "Try It",
+      links: [{ href: "/gap-check", label: "Free Gap Check" }],
+    },
+    {
+      label: "Admin",
+      links: [
+        {
+          href: "/admin/review-queue",
+          label: "Review Queue",
+          adminOnly: true,
+        },
+        {
+          href: "/admin/controls",
+          label: "Control Library",
+          adminOnly: true,
+        },
+      ],
+    },
+  ],
 };
