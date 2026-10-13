@@ -1,13 +1,38 @@
-import { getServerSession } from "@nexus/identity-and-access";
-import { redirect } from "next/navigation";
+import type { JSX } from "react";
+import Link from "next/link";
+import { buildDb } from "@/lib/db";
+import { getSessionUser } from "@/lib/admin-auth";
+import { resolveOrgId } from "@/lib/soc2/controls/mapper";
 import { getGithubInstallation, listGithubRepositories } from "@/lib/soc2/connectors/github";
 
-export default async function GithubConnectorPage(): Promise<JSX.Element> {
-  const session = await getServerSession();
-  const orgId = (session as { orgId?: string } | null)?.orgId;
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-  if (!session || !orgId) {
-    redirect("/api/auth/login");
+export default async function GithubConnectorPage(): Promise<JSX.Element> {
+  const user = await getSessionUser();
+  if (!user) {
+    return (
+      <main>
+        <h1>GitHub connector</h1>
+        <p className="empty">
+          Please <Link href="/login">log in</Link> to connect your GitHub organization.
+        </p>
+      </main>
+    );
+  }
+
+  const orgId = await resolveOrgId(buildDb(), user.id);
+  if (!orgId) {
+    return (
+      <main>
+        <h1>GitHub connector</h1>
+        <p>Connect a read-only GitHub App to collect CC6/CC8 evidence from PR workflows and branch protections.</p>
+        <p className="empty">
+          Set up your workspace first on the <Link href="/org">organization page</Link>, then return here to
+          install the GitHub App.
+        </p>
+      </main>
+    );
   }
 
   const installation = await getGithubInstallation(orgId);
