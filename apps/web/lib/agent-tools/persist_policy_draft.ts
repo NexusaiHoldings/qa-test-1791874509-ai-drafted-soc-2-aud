@@ -1,87 +1,85 @@
+/**
+ * Company-local agent tool handler: `persist_policy_draft`.
+ *
+ * Confirm-gated mutation (autonomy = confirm). The LLM drafts a SOC 2 policy
+ * version + its grounded claims; after the draft passes zod validation AND the
+ * customer confirms, the approved-actions bridge routes the tool call here to
+ * persist it. Writes one `soc2_policy_versions` row (status `in_review`) and a
+ * `soc2_policy_claims` row per claim, atomically in a single statement.
+ *
+ * Signature matches the lego handler shape consumed by DOMAIN_DISPATCH:
+ *   (ctx: HandlerContext, args: Args) => Promise<HandlerResult>
+ */
+
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
 import { randomUUID } from "node:crypto";
 
-type Args = {
-  orgId: string;
-  policyId: string;
-  title: string;
-  bodyMarkdown: string;
-  rationale?: string;
-  claims: Array<{
-    claimType: string;
-    claimText: string;
-    sourceArtifactId?: string | null;
-    sourceExcerpt?: string | null;
-  }>;
-  modelName?: string;
-};
+interface ClaimInput {
+  readonly claimType: string;
+  readonly claimText: string;
+  readonly sourceArtifactId: string | null;
+  readonly sourceExcerpt: string | null;
+}
 
-type DbLike = {
-  query: (sql: string, params?: unknown[]) => Promise<{ rows?: Record<string, unknown>[] }>;
-};
+export interface Args {
+  readonly orgId: string;
+  readonly policyId: string;
+  readonly title: string;
+  readonly bodyMarkdown: string;
+  readonly rationale?: string | null;
+  readonly draftedBy?: string | null;
+  readonly modelName?: string | null;
+  readonly claims: ClaimInput[];
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function toArgs(input: unknown): Args {
+function requireNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Invalid args.${field}: expected a non-empty string`);
+  }
+  return value;
+}
+
+function optionalString(value: unknown, field: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new Error(`Invalid args.${field}: expected a string or null`);
+  }
+  return value;
+}
+
+function parseArgs(input: unknown): Args {
   if (!isObject(input)) {
-    throw new Error("Invalid args: expected object");
+    throw new Error("Invalid args: expected an object");
   }
 
-  const {
-    orgId,
-    policyId,
-    title,
-    bodyMarkdown,
-    rationale,
-    claims,
-    modelName,
-  } = input as Record<string, unknown>;
+  const orgId = requireNonEmptyString(input.orgId, "orgId");
+  const policyId = requireNonEmptyString(input.policyId, "policyId");
+  const title = requireNonEmptyString(input.title, "title");
+  const bodyMarkdown = requireNonEmptyString(input.bodyMarkdown, "bodyMarkdown");
 
-  if (typeof orgId !== "string" || orgId.length === 0) {
-    throw new Error("Invalid args.orgId");
-  }
-  if (typeof policyId !== "string" || policyId.length === 0) {
-    throw new Error("Invalid args.policyId");
-  }
-  if (typeof title !== "string" || title.length === 0) {
-    throw new Error("Invalid args.title");
-  }
-  if (typeof bodyMarkdown !== "string" || bodyMarkdown.length === 0) {
-    throw new Error("Invalid args.bodyMarkdown");
-  }
-  if (!Array.isArray(claims)) {
-    throw new Error("Invalid args.claims");
+  if (!Array.isArray(input.claims)) {
+    throw new Error("Invalid args.claims: expected an array");
   }
 
-  const normalizedClaims = claims.map((claim, idx) => {
-    if (!isObject(claim)) {
-      throw new Error(`Invalid args.claims[${idx}]`);
+  const claims: ClaimInput[] = input.claims.map((raw, idx) => {
+    if (!isObject(raw)) {
+      throw new Error(`Invalid args.claims[${idx}]: expected an object`);
     }
-    const claimType = claim.claimType;
-    const claimText = claim.claimText;
-    const sourceArtifactId = claim.sourceArtifactId;
-    const sourceExcerpt = claim.sourceExcerpt;
-
-    if (typeof claimType !== "string" || claimType.length === 0) {
-      throw new Error(`Invalid args.claims[${idx}].claimType`);
-    }
-    if (typeof claimText !== "string" || claimText.length === 0) {
-      throw new Error(`Invalid args.claims[${idx}].claimText`);
-    }
-    if (sourceArtifactId != null && typeof sourceArtifactId !== "string") {
-      throw new Error(`Invalid args.claims[${idx}].sourceArtifactId`);
-    }
-    if (sourceExcerpt != null && typeof sourceExcerpt !== "string") {
-      throw new Error(`Invalid args.claims[${idx}].sourceExcerpt`);
-    }
-
     return {
-      claimType,
-      claimText,
-      sourceArtifactId: sourceArtifactId ?? null,
-      sourceExcerpt: sourceExcerpt ?? null,
+      claimType: requireNonEmptyString(raw.claimType, `claims[${idx}].claimType`),
+      claimText: requireNonEmptyString(raw.claimText, `claims[${idx}].claimText`),
+      sourceArtifactId: optionalString(
+        raw.sourceArtifactId,
+        `claims[${idx}].sourceArtifactId`,
+      ),
+      sourceExcerpt: optionalString(
+        raw.sourceExcerpt,
+        `claims[${idx}].sourceExcerpt`,
+      ),
     };
   });
 
@@ -90,117 +88,114 @@ function toArgs(input: unknown): Args {
     policyId,
     title,
     bodyMarkdown,
-    rationale: typeof rationale === "string" ? rationale : undefined,
-    claims: normalizedClaims,
-    modelName: typeof modelName === "string" ? modelName : undefined,
+    rationale: optionalString(input.rationale, "rationale"),
+    draftedBy: optionalString(input.draftedBy, "draftedBy"),
+    modelName: optionalString(input.modelName, "modelName"),
+    claims,
   };
 }
 
-async function getDbFromContext(ctx: HandlerContext): Promise<DbLike> {
-  const maybeDb = (ctx as unknown as { db?: DbLike }).db;
-  if (!maybeDb || typeof maybeDb.query !== "function") {
-    throw new Error("Database handle is missing from handler context");
-  }
-  return maybeDb;
-}
+const INSERT_SQL = `
+  WITH new_version AS (
+    INSERT INTO soc2_policy_versions (
+      id, org_id, policy_id, title, body_markdown, rationale,
+      status, drafted_by, drafted_with_model, created_at, updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, 'in_review', $7, $8, NOW(), NOW())
+    RETURNING id
+  ),
+  inserted_claims AS (
+    INSERT INTO soc2_policy_claims (
+      id, org_id, policy_version_id, claim_type, claim_text,
+      source_artifact_id, source_excerpt, created_at
+    )
+    SELECT
+      c.id, $2, (SELECT id FROM new_version),
+      c.claim_type, c.claim_text, c.source_artifact_id, c.source_excerpt, NOW()
+    FROM unnest(
+      $9::uuid[], $10::text[], $11::text[], $12::uuid[], $13::text[]
+    ) AS c(id, claim_type, claim_text, source_artifact_id, source_excerpt)
+    RETURNING id
+  )
+  SELECT
+    (SELECT id FROM new_version) AS version_id,
+    (SELECT count(*)::int FROM inserted_claims) AS claims_persisted
+`;
 
+/**
+ * Persist a confirmed, zod-validated policy draft.
+ *
+ * @throws never — all failures are returned as a structured HandlerResult.
+ */
 export async function handlePersistPolicyDraft(
   ctx: HandlerContext,
   args: Args,
 ): Promise<HandlerResult> {
+  let parsed: Args;
   try {
-    const parsed = toArgs(args);
-    const db = await getDbFromContext(ctx);
+    parsed = parseArgs(args);
+  } catch (error) {
+    return {
+      status: 400,
+      body:
+        error instanceof Error ? error.message : "Invalid persist_policy_draft args",
+    };
+  }
 
-    const versionId = randomUUID();
-    const insertedBy =
-      (ctx as unknown as { actorId?: string; userId?: string }).actorId ??
-      (ctx as unknown as { actorId?: string; userId?: string }).userId ??
-      null;
+  const versionId = randomUUID();
+  const claimIds = parsed.claims.map(() => randomUUID());
+  const claimTypes = parsed.claims.map((c) => c.claimType);
+  const claimTexts = parsed.claims.map((c) => c.claimText);
+  const claimArtifactIds = parsed.claims.map((c) => c.sourceArtifactId);
+  const claimExcerpts = parsed.claims.map((c) => c.sourceExcerpt);
 
-    await db.query("BEGIN");
-
-    await db.query(
-      `
-        INSERT INTO soc2_policy_versions (
-          id,
-          org_id,
-          policy_id,
-          title,
-          body_markdown,
-          rationale,
-          status,
-          drafted_by,
-          drafted_with_model,
-          created_at,
-          updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,'in_review',$7,$8,NOW(),NOW())
-      `,
-      [
-        versionId,
-        parsed.orgId,
-        parsed.policyId,
-        parsed.title,
-        parsed.bodyMarkdown,
-        parsed.rationale ?? null,
-        insertedBy,
-        parsed.modelName ?? null,
-      ],
+  try {
+    const rows = await ctx.db.query<{
+      version_id: string;
+      claims_persisted: number;
+    }>(
+      INSERT_SQL,
+      versionId,
+      parsed.orgId,
+      parsed.policyId,
+      parsed.title,
+      parsed.bodyMarkdown,
+      parsed.rationale,
+      parsed.draftedBy,
+      parsed.modelName,
+      claimIds,
+      claimTypes,
+      claimTexts,
+      claimArtifactIds,
+      claimExcerpts,
     );
 
-    for (const claim of parsed.claims) {
-      await db.query(
-        `
-          INSERT INTO soc2_policy_claims (
-            id,
-            org_id,
-            policy_version_id,
-            claim_type,
-            claim_text,
-            source_artifact_id,
-            source_excerpt,
-            created_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
-        `,
-        [
-          randomUUID(),
-          parsed.orgId,
-          versionId,
-          claim.claimType,
-          claim.claimText,
-          claim.sourceArtifactId,
-          claim.sourceExcerpt,
-        ],
-      );
-    }
-
-    await db.query("COMMIT");
-
+    const result = rows[0];
     return {
-      ok: true,
-      data: {
-        versionId,
+      status: 200,
+      body: {
+        ok: true,
+        versionId: result?.version_id ?? versionId,
         policyId: parsed.policyId,
         status: "in_review",
-        claimsPersisted: parsed.claims.length,
+        claimsPersisted: result?.claims_persisted ?? parsed.claims.length,
       },
-    } as HandlerResult;
+    };
   } catch (error) {
-    const dbMaybe = (ctx as unknown as { db?: DbLike }).db;
-    if (dbMaybe && typeof dbMaybe.query === "function") {
-      try {
-        await dbMaybe.query("ROLLBACK");
-      } catch {
-        // no-op: preserve original error
-      }
-    }
-
+    const message =
+      error instanceof Error ? error.message : "Unknown persistence error";
+    console.error(
+      JSON.stringify({
+        level: "error",
+        tool: "persist_policy_draft",
+        org_id: parsed.orgId,
+        policy_id: parsed.policyId,
+        message,
+      }),
+    );
     return {
-      ok: false,
-      error: {
-        code: "persist_policy_draft_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
-      },
-    } as HandlerResult;
+      status: 500,
+      body: `persist_policy_draft failed: ${message}`,
+    };
   }
 }
