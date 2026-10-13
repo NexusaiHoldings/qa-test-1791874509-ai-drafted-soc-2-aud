@@ -293,92 +293,10 @@ CREATE TABLE IF NOT EXISTS soc2_connector_webhook_events (
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   received_at timestamptz NOT NULL DEFAULT now(),
   processed_at timestamptz,
-  status text NOT NULL DEFAULT 'received',
-  error text
+  processing_error text
 );
-CREATE INDEX IF NOT EXISTS idx_soc2_connector_webhooks_installation
+CREATE INDEX IF NOT EXISTS idx_soc2_connector_webhook_events_org
+  ON soc2_connector_webhook_events (org_id, provider, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_soc2_connector_webhook_events_install
   ON soc2_connector_webhook_events (provider, installation_id, received_at DESC);
-`;
-
-/**
- * Weekly gap analysis + remediation tracker (F1-006).
- *
- * The 'gap assessment and readiness review' workstream becomes a weekly
- * automated report (Monday 06:00 UTC cron, also runnable on demand). The scorer
- * computes a 0..100 coverage score per Security TSC criterion from confirmed
- * evidence links, approved policy coverage and artifact freshness (<90 days),
- * then writes:
- *   - one soc2_gap_reports row (overall readiness %, week-over-week delta);
- *   - one soc2_gap_findings row per criterion below the readiness threshold
- *     (severity, missing evidence, specific remediation instructions);
- *   - one soc2_remediation_tasks row per finding the customer can assign/close.
- *
- * Critical findings hold the digest: a report with ≥1 critical finding is written
- * with released_at = NULL and sits in the operator review queue until an owner/
- * admin clears it (liability human_in_loop_required_for[1]). Only then is the
- * @nexus/notifications email + in-app digest sent. A report with no critical
- * finding auto-releases on generation.
- *
- * Idempotent (CREATE TABLE IF NOT EXISTS) and picked up by migrate.ts via the
- * *_DDL suffix convention.
- */
-export const SOC2_GAPS_DDL = `
--- ── Weekly gap report (per-tenant, one immutable snapshot per week) ──
-CREATE TABLE IF NOT EXISTS soc2_gap_reports (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL,
-  report_week date NOT NULL,
-  overall_readiness numeric(5,2) NOT NULL DEFAULT 0,
-  previous_readiness numeric(5,2),
-  readiness_delta numeric(6,2) NOT NULL DEFAULT 0,
-  total_criteria integer NOT NULL DEFAULT 0,
-  covered_criteria integer NOT NULL DEFAULT 0,
-  findings_count integer NOT NULL DEFAULT 0,
-  critical_count integer NOT NULL DEFAULT 0,
-  resolved_since_last integer NOT NULL DEFAULT 0,
-  generated_by text NOT NULL DEFAULT 'cron',
-  category_breakdown jsonb NOT NULL DEFAULT '[]'::jsonb,
-  released_at timestamptz,
-  released_by uuid,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (org_id, report_week)
-);
-CREATE INDEX IF NOT EXISTS idx_soc2_gap_reports_org
-  ON soc2_gap_reports (org_id, report_week DESC);
-
--- ── Per-criterion findings below the readiness threshold ──
--- severity: 'critical' | 'high' | 'medium' | 'low'. Critical findings are held
--- (released_at on the parent report stays NULL) until an operator clears them.
-CREATE TABLE IF NOT EXISTS soc2_gap_findings (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL,
-  report_id uuid NOT NULL REFERENCES soc2_gap_reports (id) ON DELETE CASCADE,
-  control_id text NOT NULL,
-  severity text NOT NULL,
-  score numeric(5,2) NOT NULL DEFAULT 0,
-  missing_evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
-  remediation_instructions text NOT NULL DEFAULT '',
-  status text NOT NULL DEFAULT 'open',
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_soc2_gap_findings_report
-  ON soc2_gap_findings (report_id, severity, created_at DESC);
-
--- ── Actionable remediation tasks ──
-CREATE TABLE IF NOT EXISTS soc2_remediation_tasks (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id uuid NOT NULL,
-  finding_id uuid NOT NULL REFERENCES soc2_gap_findings (id) ON DELETE CASCADE,
-  title text NOT NULL,
-  description text NOT NULL DEFAULT '',
-  status text NOT NULL DEFAULT 'open',
-  priority text NOT NULL DEFAULT 'medium',
-  assignee_id uuid,
-  due_at timestamptz,
-  closed_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_soc2_remediation_tasks_org
-  ON soc2_remediation_tasks (org_id, status, priority, created_at DESC);
 `;
