@@ -24,6 +24,7 @@
  */
 
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
+import { handleCreateRemediationTasks } from "./create_remediation_tasks";
 import { handlePersistPolicyDraft } from "./persist_policy_draft";
 
 type Args = Record<string, unknown>;
@@ -34,4 +35,5 @@ export const DOMAIN_DISPATCH: Record<
 > = {
   // Build agent appends entries here per CTO-declared new_domain_tool.
   persist_policy_draft: (ctx, a) => handlePersistPolicyDraft(ctx, a as never),
+  create_remediation_tasks: (ctx, a) => handleCreateRemediationTasks(ctx, a),
 };
